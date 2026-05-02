@@ -1,0 +1,413 @@
+You are tasked with building a highly stable and undetected Roblox executor (target name: "Syntax") capable of achieving an 89% UNC score. You are provided with the foundational components (memory/, syscalls/, 
+
+winhttp_client.h
+, 
+
+http_server.h
+, third_party/), and your goal is to wire them together into a reliable external controller execution engine without triggering Error 268 (unexpected client behavior) kicks.
+
+⚠️ CRITICAL ARCHITECTURE RULE: This executor is EXTERNAL. The C++ DLL (SyntaxAPI.dll) is loaded by the UI process, NOT injected into Roblox. It reads/writes Roblox memory externally via 
+
+OpenProcess
+ + ReadProcessMemory/WriteProcessMemory (or their syscall equivalents). The only code that runs inside Roblox is the Lua init script, which is loaded by hijacking a CoreGui ModuleScript's bytecode.
+
+1. Overall Architecture: External Controller + Lua Polling Worker
+┌─────────────┐     P/Invoke      ┌──────────────────┐    External Memory    ┌──────────────┐
+│  SyntaxUI    │ ◄──────────────► │  SyntaxAPI.dll   │ ◄──────────────────► │   Roblox     │
+│  (C# WPF)   │  RblxCore.cs     │  (exports.cpp)   │  Read/WriteMemory    │  Process     │
+│              │                  │                  │                      │              │
+│  Attach btn  │─► Connect(pid)──►│  1. OpenProcess   │                      │              │
+│  Execute btn │─► ExecuteScript()│  2. Find DataModel│                      │              │
+│              │                  │  3. SpoofWith     │──► Hijack Module ──► │ Init Script  │
+│              │                  │  4. HTTP Server   │◄── /poll ──────────► │ Lua Worker   │
+└─────────────┘                  └──────────────────┘                      └──────────────┘
+The Flow:
+UI loads SyntaxAPI.dll via LoadLibrary (C# P/Invoke bridge in 
+
+RblxCore.cs
+).
+User clicks Attach → UI calls 
+
+Connect(pid)
+.
+
+Connect(pid)
+ in 
+
+exports.cpp
+:
+Opens a handle to Roblox via 
+
+OpenProcess
+ (or NtOpenProcess syscall).
+Finds the 
+
+DataModel
+ by scanning TaskScheduler jobs.
+Navigates the instance tree: DataModel → CoreGui → RobloxGui → Modules.
+Finds PlayerListManager (the SpoofWith target object).
+Finds an unloaded ModuleScript with a test/story name.
+Compiles the init script → BLAKE3 signs → ZSTD compresses → RSB1 encodes.
+Writes the RSB1 bytecode into Roblox's memory (allocated via VirtualAllocEx).
+Overwrites the ModuleScript's BytecodePointer and InstanceCapabilities.
+Writes the ModuleScript address into PlayerListManager + 0x8 (the SpoofTarget offset).
+Simulates ESC key to open Roblox menu → triggers require() on the spoofed module.
+Waits for confirmation signal (a "Syntax" folder appearing in CoreGui).
+Immediately restores the SpoofTarget pointer to its original value.
+Starts a local HTTP server on 127.0.0.1:9753.
+Init script (now running inside Roblox with Identity 8) sets up the UNC sandbox and starts an infinite loop polling GET /poll on the local HTTP server.
+User clicks Execute → UI calls 
+
+ExecuteScript(src)
+ → C++ queues the script → Lua picks it up via /poll → passes through loadstring → task.spawn(fn).
+2. File-by-File Implementation Guide
+2.1 
+
+exports.h
+ / 
+
+exports.cpp
+ — The Native API
+These files define the extern "C" API that the C# UI consumes via P/Invoke.
+
+Required Exports:
+
+Function	Signature	Purpose
+
+Initialize
+bool __stdcall()	Init syscall resolver
+
+FindRobloxProcess
+DWORD __stdcall()	Enumerate processes, return best PID
+
+Connect
+bool __stdcall(DWORD pid)	Full attach pipeline (see §1.3)
+
+Disconnect
+void __stdcall()	Restore modules, stop HTTP server
+
+ExecuteScript
+int __stdcall(const char*, int)	Queue script for Lua worker
+
+GetDataModel
+uintptr_t __stdcall()	Find DataModel in Roblox memory
+
+GetRobloxPid
+DWORD __stdcall()	Return current attached PID
+
+RedirConsole
+void __stdcall()	Redirect stdout to parent console
+
+GetJobCount
+int __stdcall()	Count TaskScheduler jobs
+
+GetLastExecError
+int __stdcall(char*, int)	Get last error string
+
+ReadMemory
+bool __stdcall(uintptr_t, void*, size_t)	Read from Roblox
+
+WriteMemory
+bool __stdcall(uintptr_t, void*, size_t)	Write to Roblox
+
+GetClientInfo
+bool __stdcall(char*, int)	Get player name, userId, jobId, placeId
+
+FindRobloxProcess
+ Detail: When multiple Roblox processes exist (e.g., Microsoft Store version), pick the one with the most TaskScheduler jobs — that's the game client, not the launcher.
+
+
+GetDataModel
+ Detail:
+
+Primary method: Read FakeDataModelPointer from base + offsets::Pointer::FakeDataModelPointer, dereference at +0x1C0, validate by checking if the ClassDescriptor name is "DataModel".
+Fallback method: Scan all TaskScheduler jobs. For each job, read a block of 0x80 pointers and check each one for a ClassDescriptor whose name is "DataModel".
+
+Connect
+ Detail: After opening the process handle and finding the DataModel, call ScriptExecutor::Execute(handle, base, dataModel, "", err) with an empty source string. This triggers the init-only injection path inside 
+
+executor.h
+.
+
+
+ExecuteScript
+ Detail:
+
+Must validate DataModel is still alive before executing (teleport detection).
+Check instance name is "Game" or "App" and parent is 0 (root).
+If invalid, call 
+
+CleanupSession()
+ and re-find DataModel.
+2.2 
+
+executor.h
+ — The Execution Engine
+This is the core class 
+
+ScriptExecutor
+ with the following key methods:
+
+
+Execute(hProcess, base, dataModel, source, errorOut)
+ — Main Entry Point
+Phase 1 (first call only):
+  1. CacheNavigation() — find CoreGui, RobloxGui, Modules, PlayerList, PlayerListManager
+  2. Start HttpServer with callbacks for FindUnloadedModule, RestoreAllModules, and module tracking
+  3. Check for existing session recovery (Syntax folder already in CoreGui)
+  4. If not recovered: InjectViaSpoof() with the init script
+  5. Sleep(3000) — wait for Lua listener to start
+Phase 2 (every call):
+  1. HttpServer::QueueScript(source)
+  2. Lua polling worker picks it up via GET /poll
+
+CacheNavigation(hProcess, dataModel, errorOut)
+ — Instance Tree Walker
+Navigate using the rblx:: helper namespace (defined in instance_walker.h):
+
+DataModel
+  └─ CoreGui (find by ClassName)
+       └─ RobloxGui (find by Name)
+            └─ Modules (find by Name)
+                 └─ PlayerList (find by Name)
+                      └─ PlayerListManager (find by Name) ← SpoofTarget lives here
+Cache all of these addresses. They don't change during a session.
+
+
+FindUnloadedModule(hProcess, outName)
+ — Module Scanner
+Scan all children of 
+
+Modules
+ (and nested subfolders).
+Filter for ModuleScript class only.
+CRITICAL: Only select modules whose names contain jest, test, spec, or story (case-insensitive). This avoids corrupting active UI modules which would crash the game.
+Check the loadedStatus byte at offset +0x188. Only use modules where this is 0x00 (never been required).
+Validate the module has a valid parent chain (parent and grandparent must be valid instances).
+Cache the results on first scan. Rotate through them using a s_ModuleIndex counter.
+Build the full instance path (e.g., CoreGui.RobloxGui.Modules.AvatarExperience.init.storybook) and return it in outName.
+
+InjectViaSpoof(hProcess, luaSource, label, errorOut)
+ — The SpoofWith Technique
+This is the only way code gets into Roblox. It works like this:
+
+Find a module via 
+
+FindUnloadedModule()
+.
+Wrap the Lua source:
+cpp
+"task.spawn(function() " + luaSource + "\nend);"
+"return setmetatable({}, {__index = function() return function() end end})"
+The wrapper ensures the code runs asynchronously via task.spawn while returning a dummy table so require() doesn't error.
+Compile using LuauCompiler::Compile().
+Sign with BLAKE3: append a 40-byte footer (8-byte magic \x00\x00\x00\x05\x00\x00\x00\x00 + 32-byte BLAKE3 hash of the bytecode).
+Compress with ZSTD and wrap in RSB1 format via RSB1Encoder::Encode().
+Write bytecode via 
+
+SetBytecode()
+ (see below).
+Save the original SpoofTarget pointer at PlayerListManager + 0x8.
+Write the target module's address into PlayerListManager + 0x8.
+Trigger: Simulate an ESC key press to open the Roblox menu. This causes the engine to require() the PlayerListManager's spoofed target, which now points to our hijacked module.
+Wait for confirmation: poll CoreGui's children for a folder named "Syntax" (created by the init script). Max 4 seconds (40 × 100ms).
+Close menu: Simulate another ESC key press.
+Restore: Write the original pointer back to PlayerListManager + 0x8 immediately.
+
+SetBytecode(hProcess, moduleScript, rsb1Data)
+ — Memory Overwrite
+Read the embedded pointer at moduleScript + offsets::ModuleScript::ModuleScriptByteCode (offset 0x150).
+Save originals into a 
+
+ModifiedModule
+ struct: originalBytecodePtr (at embedded + 0x10), originalSize (at embedded + 0x20), originalCapabilities (at moduleScript + 0x208).
+Allocate remote memory in Roblox via NtAllocateVirtualMemory.
+Write the RSB1 data to the allocated memory.
+Overwrite embedded + 0x10 (BytecodePointer) → point to allocated memory.
+Overwrite embedded + 0x20 (BytecodeSize) → new size.
+Overwrite moduleScript + 0x208 (InstanceCapabilities) → 0x3FFFFFFF (max privileges, Identity 8).
+
+SimulateEscKey()
+ — Menu Trigger
+Find the Roblox window by enumerating windows matching sRobloxPid.
+SetForegroundWindow(hwnd) with retry loop.
+Send VK_ESCAPE via SendInput (keydown + keyup).
+Alternative/Supplement: Use PostMessage(hwnd, WM_KEYDOWN, VK_ESCAPE, ...) if SendInput is unreliable.
+
+RestoreAllModules()
+ — Cleanup
+Iterate sModifiedModules. For each entry:
+
+Only if rblx::IsValidInstance(hProcess, moduleAddr) returns true:
+Restore BytecodePointer at embedded + 0x10
+Restore BytecodeSize at embedded + 0x20
+Restore InstanceCapabilities at moduleScript + 0x208
+2.3 
+
+http_server.h
+ — The C++ HTTP Server
+Uses httplib (header-only, in third_party/). Listens on 127.0.0.1:9753.
+
+Endpoints:
+
+Endpoint	Method	Purpose
+/poll	GET	Returns next queued script (200 + body) or empty 204
+/ls	POST	Receives Lua source, compiles to RSB1, writes to a ModuleScript, returns JSON {"path": ["CoreGui", "RobloxGui", ...]}
+/req	POST	HTTP proxy: receives JSON {url, method, headers, body}, performs real HTTP request via WinHttpClient, returns JSON {StatusCode, Body, Headers}
+/cleanup	POST	Calls 
+
+RestoreAllModules()
+, resets DataModel state
+/ls Handler Detail:
+
+Receive raw Lua source in the POST body.
+Wrap in module return format:
+lua
+local module = {}
+module["Syntax"] = function()
+  <user_source>
+end
+return module
+Compile → BLAKE3 sign → ZSTD compress → RSB1 encode.
+Call 
+
+FindUnloadedModule(hProcess, outName)
+ to get a target.
+Call 
+
+SetBytecode()
+ to overwrite the module's memory.
+Patch InstanceCapabilities to 0x3FFFFFFF.
+Split outName by . into path parts.
+Return JSON: {"path": ["CoreGui", "RobloxGui", "Modules", ...]}
+Script Queue:
+
+Thread-safe std::queue<std::string> with std::mutex.
+QueueScript(src) pushes to the queue.
+/poll handler pops from the queue.
+2.4 The Init Script (embedded in executor.h::GetInitScript())
+This is a large Lua string embedded in C++. It runs inside Roblox with Identity 8 (CoreScript context). It is split into three parts concatenated together:
+
+Part 1: Environment Setup
+
+lua
+local HttpService = game:FindService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local SERVER = "http://127.0.0.1:9753"
+local EXEC_NAME = "Syntax"
+-- Signal to C++ that init succeeded
+local container = Instance.new("Folder")
+container.Name = EXEC_NAME  -- C++ polls for this!
+container.Parent = CoreGui
+-- Anchor script to prevent GC
+script.Parent = container
+script.Name = "_init"
+-- SendRequest using RequestInternal (CoreScript-only API, no logging)
+local function SendRequest(options, timeout) ... end
+Part 2: UNC Sandbox (from 
+
+unc_payload.h
+)
+
+Syntax.loadstring(content): POST to /ls, resolve path, require() the module, extract function, setfenv(fn, genv).
+Syntax.request(options): POST to /req proxy.
+Syntax.httpget(url): Wrapper around request.
+Syntax.getgenv(), Syntax.getrenv(), Syntax.identifyexecutor(), Syntax.getidentity(), etc.
+Syntax.gethui(): Returns a Folder parented to PlayerGui (NOT CoreGui!) to avoid input crash.
+gameProxy: Metatable proxy over game that intercepts HttpGet, GetService("CoreGui"), and wraps all function calls in pcall to suppress security errors.
+genv metatable with __index = basenv fallback to base environment.
+shared._rblx_genv = genv for cross-script access.
+Part 3: Polling Loop
+
+lua
+while task.wait(0.1) do
+    local result = SendRequest({Url = SERVER .. "/poll", Method = "GET"}, 2)
+    if result and result.Success and #result.Body > 0 then
+        local fn = Syntax.loadstring(result.Body)
+        if fn then
+            setfenv(fn, genv)
+            task.spawn(fn)
+        end
+    end
+end
+2.5 
+
+process/scanner.h
+ — Process Scanner
+A 
+
+ProcessScanner
+ namespace (not class) providing:
+
+
+FindRobloxProcesses()
+ → scans process list for RobloxPlayerBeta.exe / Windows10Universal.exe.
+GetProcessBaseAddress(pid) → reads main module base via Module32FirstW.
+
+Connect(pid)
+ → 
+
+OpenProcess
+ + GetProcessBaseAddress, returns std::optional<RobloxProcess>.
+
+ReadMemory(h, addr, buf, size)
+ → NtReadVirtualMemory with ReadProcessMemory fallback.
+
+WriteMemory(h, addr, buf, size)
+ → NtWriteVirtualMemory with WriteProcessMemory fallback.
+Read<T>(h, addr) → template helper.
+
+ReadString(h, addr)
+ → MSVC std::string SSO-aware reader (inline if capacity ≤ 15, heap pointer otherwise).
+2.6 memory/instance_walker.h — Roblox Instance Helpers
+The rblx:: namespace provides helpers for navigating the Roblox instance tree externally:
+
+GetChildren(h, instance) → reads children vector from instance + 0x70, iterates pointers from start to +0x8.
+ReadClassName(h, instance) → reads ClassDescriptor at +0x18, then class name pointer at +0x8.
+ReadInstanceName(h, instance) → reads name from +0xB0 using SSO string layout.
+FindChildByName(h, parent, name) → iterates children, compares names.
+FindChildByClassName(h, parent, className) → iterates children, compares class names.
+IsValidInstance(h, addr) → validates pointer range and reads ClassDescriptor to check it's plausible.
+ReadRobloxString(h, addr) → same as ProcessScanner::ReadString but using rblx SSO layout.
+2.7 
+
+offsets.h
+ — Roblox Memory Offsets
+⚠️ These break on every Roblox update! Source: https://github.com/NtReadVirtualMemory/Roblox-Offsets-Website
+
+Key offsets used by the executor:
+
+Instance::Children = 0x70, Instance::Parent = 0x68, Instance::ClassDescriptor = 0x18, Instance::Name = 0xB0, Instance::InstanceCapabilities = 0x208
+ModuleScript::ModuleScriptByteCode = 0x150
+PlayerListManager::SpoofTarget = 0x8
+Pointer::TaskScheduler, Pointer::FakeDataModelPointer (base-relative globals)
+TaskScheduler::JobStart = 0x1D0, TaskScheduler::JobEnd = 0x1D8
+2.8 
+
+RblxCore.cs
+ — C# P/Invoke Bridge
+Maps every extern "C" export to a C# static method:
+
+csharp
+[DllImport("SyntaxAPI.dll", CallingConvention = CallingConvention.StdCall)]
+public static extern bool Connect(uint pid);
+2.9 
+
+MainWindow.xaml.cs
+ — WPF UI Logic
+Attach button: RblxCore.Initialize() → RblxCore.FindRobloxProcess() → RblxCore.Connect(pid).
+Execute button: RblxCore.ExecuteScript(scriptText, scriptText.Length).
+No manual DLL injection (LoadLibrary, CreateRemoteThread, etc.). The DLL is loaded in-process by the UI.
+3. Anti-Detection & Stability Rules
+Never use game:HttpGet for internal communication. Use HttpService:RequestInternal (available in CoreScript context) routed through SendRequest.
+Never hijack active modules. Only use modules with jest/test/spec/story in their name AND loadedStatus == 0x00.
+Always restore memory on leave. Bind game.Close, game:GetPropertyChangedSignal("GameId"), and game:BindToClose to /cleanup.
+Only restore if valid. Check rblx::IsValidInstance() before writing back originals — the DataModel may already be destroyed during teleport.
+Cache module scans. Don't re-scan the instance tree on every loadstring call. Cache valid modules and rotate through them.
+Wrap all game API calls in pcall inside the proxy to prevent native security exceptions from crashing the script.
+Parent UI elements to PlayerGui, not CoreGui via gethui() to avoid Identity 2 input restriction crashes.
+4. Build Steps
+C++ DLL: Build via CMake → produces SyntaxAPI.dll in build/Release/.
+C# UI: Build via dotnet build in SyntaxUI/ → produces SyntaxUI.exe.
+Copy SyntaxAPI.dll next to SyntaxUI.exe (or set the output path in CMake).
+Run SyntaxUI.exe from a terminal to see console output from RedirConsole().

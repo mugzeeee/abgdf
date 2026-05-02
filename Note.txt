@@ -1,0 +1,10 @@
+THE BUILD DIRECTORY HERE :ui\bin\x64\Release\net10.0-windows
+
+COMMANDS TO BUILD:
+
+cmake -B build -A x64
+cmake --build build --config Release
+
+
+
+YOU NEED TO INSTALL CMAKE
