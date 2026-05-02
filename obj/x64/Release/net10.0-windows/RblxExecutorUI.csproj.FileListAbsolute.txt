@@ -1,0 +1,23 @@
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\bin\x64\Release\net10.0-windows\ICSharpCode.AvalonEdit.dll
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\RblxExecutorUI.csproj.AssemblyReference.cache
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\MainWindow.baml
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\MainWindow.g.cs
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\App.g.cs
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\RblxExecutorUI.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\RblxExecutorUI.AssemblyInfoInputs.cache
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\RblxExecutorUI.AssemblyInfo.cs
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\RblxExecutorUI.csproj.CoreCompileInputs.cache
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\RblxExec.EAD08EB8.Up2Date
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\RblxExecutorUI.genruntimeconfig.cache
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\bin\x64\Release\net10.0-windows\Lua.xshd
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\bin\x64\Release\net10.0-windows\Syntax Executor.exe
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\bin\x64\Release\net10.0-windows\Syntax Executor.deps.json
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\bin\x64\Release\net10.0-windows\Syntax Executor.runtimeconfig.json
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\bin\x64\Release\net10.0-windows\Syntax Executor.dll
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\bin\x64\Release\net10.0-windows\Syntax Executor.pdb
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\Syntax Executor_MarkupCompile.cache
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\Syntax Executor.g.resources
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\Syntax Executor.dll
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\refint\Syntax Executor.dll
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\Syntax Executor.pdb
+C:\Users\MSZ\source\repos\Rblx Executor Api\ui\obj\x64\Release\net10.0-windows\ref\Syntax Executor.dll
